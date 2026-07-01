@@ -47,6 +47,23 @@ jobs:
         env:
           GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
 
+      - name: Diagnóstico del JSON (sin exponer la clave privada)
+        run: |
+          echo "Tamaño del archivo (bytes):"
+          wc -c service_account.json
+          echo "---"
+          echo "¿Contiene \"type\": \"service_account\"?"
+          grep -o '"type"[^,]*' service_account.json || echo "NO SE ENCONTRÓ el campo type"
+          echo "---"
+          echo "¿Contiene client_email?"
+          grep -o '"client_email"[^,]*' service_account.json || echo "NO SE ENCONTRÓ client_email"
+          echo "---"
+          echo "Primeros 30 caracteres del archivo:"
+          head -c 30 service_account.json
+          echo ""
+          echo "Últimos 30 caracteres del archivo:"
+          tail -c 30 service_account.json
+
       - name: Instalar paquetes de R faltantes
         run: |
           Rscript -e 'if (!require("pacman")) install.packages("pacman")'
