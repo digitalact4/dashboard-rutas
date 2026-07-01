@@ -355,7 +355,7 @@ datatable(
              "Hora"="HORA_INICIO","Validación"="dist_label"),
   rownames=FALSE,
   filter="none"
-) %>% formatStyle("dist_label",
+) %>% formatStyle("Validación",
       backgroundColor=styleEqual(
         c("OK", paste0("EXCEDE ",DIST_MAX,"m"), "Sin término"),
         c("lightgreen","salmon","lightyellow")))
