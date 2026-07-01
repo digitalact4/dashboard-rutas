@@ -43,7 +43,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Escribir credencial de la cuenta de servicio
-        run: echo "$GDRIVE_SA_JSON" > service_account.json
+        shell: bash
+        run: printf '%s' "$GDRIVE_SA_JSON" > service_account.json
         env:
           GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
 
@@ -63,6 +64,21 @@ jobs:
           echo ""
           echo "Últimos 30 caracteres del archivo:"
           tail -c 30 service_account.json
+          echo ""
+          echo "--- VALIDACIÓN REAL CON R (jsonlite) ---"
+          Rscript -e '
+            x <- tryCatch(jsonlite::fromJSON("service_account.json"), error=function(e) e)
+            if (inherits(x,"error")) {
+              cat("ERROR AL PARSEAR EL JSON:", conditionMessage(x), "\n")
+            } else {
+              cat("JSON parseado correctamente. Campos encontrados:\n")
+              print(names(x))
+              cat("Valor de type:", x$type, "\n")
+              pk <- x$private_key
+              if (is.null(pk)) pk <- ""
+              cat("Nchar de private_key:", nchar(pk), "\n")
+            }
+          '
 
       - name: Instalar paquetes de R faltantes
         run: |
