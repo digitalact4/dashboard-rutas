@@ -39,6 +39,11 @@ jobs:
     container:
       image: rocker/geospatial:latest   # ya trae sf/gdal/geos compilados
     steps:
+      - name: Instalar git (rocker/geospatial no lo trae por defecto)
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends git
+
       - name: Checkout repo
         uses: actions/checkout@v4
 
