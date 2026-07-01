@@ -1,0 +1,362 @@
+---
+title: "Rutas Encuestadores — Reporte estático"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+# ==============================================================================
+# DASHBOARD ESTÁTICO — para GitHub Pages / embed en Looker Studio
+# ==============================================================================
+# DIFERENCIAS FRENTE AL SHINY:
+#   - No hay servidor: los filtros (crosstalk) son 100% JavaScript en el
+#     navegador del que ve el reporte. Rápido, pero no puede volver a
+#     consultar Google Sheets ni recalcular nada al vuelo.
+#   - Las tarjetas de arriba (Coordinadores/Encuestadores/Entrevistas/Secciones)
+#     muestran el TOTAL GENERAL, no un total filtrado — un HTML estático no
+#     puede recalcular esos números según lo que el usuario seleccione.
+#   - Los polígonos de sección se muestran TODOS como capa de referencia
+#     (activable/desactivable con el control de capas de Leaflet), no
+#     sincronizados dinámicamente con los filtros — esa sincronización fina
+#     si necesita servidor.
+#   - Las rutas a pie por calle se precalculan UNA VEZ al momento de generar
+#     este archivo (no en cada clic). Están agrupadas por encuestador y se
+#     pueden prender/apagar con el control de capas.
+#   - El filtro por Fecha/Coordinador/Encuestador/Sección y la búsqueda por
+#     ID_registro SÍ son instantáneos e interactivos (crosstalk + DT), y de
+#     hecho se cruzan automáticamente entre sí sin necesitar la lógica
+#     manual de "cascada" que sí hizo falta en la versión Shiny.
+# ==============================================================================
+
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
+
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(flexdashboard, crosstalk, leaflet, DT, dplyr, sf,
+               googlesheets4, geosphere, stringr, jsonlite, httr,
+               RColorBrewer, htmltools)
+
+# ── CONFIGURACIÓN ────────────────────────────────────────────────────────────
+SPREADSHEET_ID <- "1StvASvRaeix0-u-jVNVs04DegSfUu9zh74ohDVv4IYk"
+HOJA_CAMPO     <- "Base demo"
+HOJA_MUE       <- "MUESTREO"
+RUTA_SHP       <- "shapefile"          # carpeta relativa al repo con el .shp y compañía
+RUTA_SERVICE_ACCOUNT <- "service_account.json"  # inyectado por GitHub Actions
+DIST_MAX       <- 500
+DIST_ESTATICO  <- 15
+
+# Tope de segmentos que se calculan por Valhalla en cada build — evita que
+# el GitHub Action se tarde una eternidad. Súbelo cuando veas cuánto tarda
+# un build real. Los segmentos que no alcanzan el tope quedan como línea recta.
+MAX_RUTAS_CI <- 150
+
+# ── AUTENTICACIÓN (obligatoria vía cuenta de servicio en este modo headless) ──
+if (file.exists(RUTA_SERVICE_ACCOUNT)) {
+  gs4_auth(path = RUTA_SERVICE_ACCOUNT)
+} else {
+  stop("No se encontró ", RUTA_SERVICE_ACCOUNT,
+       " — este reporte está pensado para correr sin interacción humana ",
+       "(GitHub Actions). Genera una cuenta de servicio y compártela con el Sheet.")
+}
+
+# ── HELPERS (idénticos a la versión Shiny) ────────────────────────────────────
+safe_vec <- function(x) sort(unique(x[!is.na(x) & nchar(trimws(x))>0]))
+na2blank <- function(x) ifelse(is.na(x),"",as.character(x))
+get_col  <- function(cols, pattern) {
+  m <- cols[grepl(pattern, cols, ignore.case=TRUE)]
+  if (length(m)==0) return(NA_character_)
+  m[1]
+}
+norm_txt <- function(x) toupper(trimws(x))
+
+make_colors <- function(v) {
+  n <- length(v); if (!n) return(character(0))
+  pal <- if (n<=8)  brewer.pal(max(3,n),"Set1") else
+    if (n<=12) brewer.pal(n,"Set3") else
+      hcl(seq(0,360,length.out=n+1)[1:n],80,50)
+  setNames(pal[1:n], v)
+}
+
+decode_pl6 <- function(encoded) {
+  tryCatch({
+    if (is.null(encoded) || length(encoded)==0 || nchar(encoded)<2) return(NULL)
+    idx <- 1; lat <- 0; lon <- 0
+    res <- data.frame(lat=numeric(), lon=numeric())
+    ch  <- utf8ToInt(encoded); n <- length(ch)
+    while(idx <= n) {
+      rv <- 0; sh <- 0
+      repeat { if(idx>n) break; b <- ch[idx]-63; idx <- idx+1
+        rv <- rv + bitwAnd(b,0x1F)*(2^sh); sh <- sh+5; if(b<32) break }
+      lat <- lat + ifelse(bitwAnd(rv,1)!=0,-(bitwShiftR(rv,1)+1),bitwShiftR(rv,1))
+      if(idx>n) break
+      rv <- 0; sh <- 0
+      repeat { if(idx>n) break; b <- ch[idx]-63; idx <- idx+1
+        rv <- rv + bitwAnd(b,0x1F)*(2^sh); sh <- sh+5; if(b<32) break }
+      lon <- lon + ifelse(bitwAnd(rv,1)!=0,-(bitwShiftR(rv,1)+1),bitwShiftR(rv,1))
+      res <- rbind(res, data.frame(lat=lat/1e6, lon=lon/1e6))
+    }
+    if(nrow(res)<2) return(NULL)
+    res
+  }, error=function(e) NULL)
+}
+
+llamar_valhalla <- function(lat0, lon0, lat1, lon1) {
+  tryCatch({
+    body <- list(locations=list(list(lon=lon0,lat=lat0,type="break"),
+                                 list(lon=lon1,lat=lat1,type="break")),
+                 costing="pedestrian", directions_options=list(units="kilometers"))
+    resp <- POST("https://valhalla1.openstreetmap.de/route",
+                 body=toJSON(body, auto_unbox=TRUE),
+                 add_headers("Content-Type"="application/json"), timeout(6))
+    if (status_code(resp)!=200) return(NULL)
+    txt <- content(resp,"text",encoding="UTF-8")
+    if (nchar(txt)<10) return(NULL)
+    m <- regmatches(txt, regexpr('"shape":"([^"]+)"', txt))
+    if (length(m)==0 || nchar(m)<10) return(NULL)
+    shape_str <- sub('"shape":"','',m); shape_str <- sub('"$','',shape_str)
+    if (nchar(shape_str)<4) return(NULL)
+    pts <- decode_pl6(shape_str)
+    if (is.null(pts) || nrow(pts)<2) return(NULL)
+    pts
+  }, error=function(e) NULL)
+}
+
+ruta_pie <- function(lat1,lon1,lat2,lon2) {
+  fallback <- data.frame(lat=c(lat1,lat2), lon=c(lon1,lon2))
+  if (any(is.na(c(lat1,lon1,lat2,lon2)))) return(fallback)
+  if (!all(is.finite(c(lat1,lon1,lat2,lon2)))) return(fallback)
+  if (distGeo(c(lon1,lat1),c(lon2,lat2)) < 1) return(fallback)
+  r1 <- llamar_valhalla(lat1,lon1,lat2,lon2)
+  if (!is.null(r1)) return(r1)
+  fallback
+}
+
+# ── SHAPEFILE ─────────────────────────────────────────────────────────────────
+shps <- list.files(RUTA_SHP,"\\.shp$",full.names=TRUE,recursive=TRUE)
+if (!length(shps)) stop("No hay .shp en ", RUTA_SHP, " — cópialo al repo antes de renderizar.")
+i   <- which(grepl("^SECCION\\.shp$",basename(shps),ignore.case=TRUE))
+SHP <- st_read(if(length(i)) shps[i[1]] else shps[1], quiet=TRUE)
+if (!st_is_longlat(SHP)) SHP <- st_transform(SHP,4326)
+cn <- names(SHP)[grepl("^seccion$",names(SHP),ignore.case=TRUE)][1]
+if (is.na(cn)) cn <- names(SHP)[grepl("secci",names(SHP),ignore.case=TRUE)][1]
+if (is.na(cn)) cn <- names(SHP)[1]
+SHP <- SHP %>% rename(SEC_NUM=all_of(cn)) %>% mutate(SEC_NUM=as.character(str_trim(SEC_NUM)))
+
+# ── MUESTREO ──────────────────────────────────────────────────────────────────
+DF_MUE <- tryCatch({
+  raw  <- read_sheet(SPREADSHEET_ID, sheet=HOJA_MUE, col_types="c")
+  cols <- names(raw)
+  cs <- get_col(cols,"^seccion$"); if(is.na(cs)) stop("Sin columna SECCION en ",HOJA_MUE)
+  cm <- get_col(cols,"muni_inegi"); if(is.na(cm)) cm <- get_col(cols,"^muni")
+  ca <- get_col(cols,"municipio_ine")
+  if(is.na(ca)) ca <- get_col(cols,"^municipio")
+  if(is.na(ca)) ca <- get_col(cols,"alcaldia")
+  if(is.na(ca)) ca <- get_col(cols,"^munic")
+  if(is.na(cm)) { raw$MUNI_INEGI_tmp <- ""; cm <- "MUNI_INEGI_tmp" }
+  if(is.na(ca)) { raw$MUNICIPIO_tmp  <- ""; ca <- "MUNICIPIO_tmp"  }
+  raw %>% select(SECCION=all_of(cs), MUNI_INEGI=all_of(cm), MUNICIPIO=all_of(ca)) %>%
+    mutate(across(everything(), na2blank)) %>%
+    distinct(SECCION,.keep_all=TRUE) %>% filter(nchar(SECCION)>0)
+}, error=function(e){ message("ERROR muestreo: ",e$message)
+  data.frame(SECCION=character(),MUNI_INEGI=character(),MUNICIPIO=character()) })
+
+# ── CAMPO ─────────────────────────────────────────────────────────────────────
+DF_RAW <- tryCatch(read_sheet(SPREADSHEET_ID, sheet=HOJA_CAMPO, col_types="c"),
+                    error=function(e){ message("ERROR campo: ",e$message); NULL })
+
+if (!is.null(DF_RAW) && nrow(DF_RAW)>0) {
+  cols <- names(DF_RAW)
+  c_seccion <- get_col(cols,"^seccion$")
+  c_fecha   <- get_col(cols,"^fecha$")
+  c_hora    <- get_col(cols,"hora.?inicio")
+  c_intento <- get_col(cols,"^intento$")
+  c_idreg   <- get_col(cols,"id.?registro")
+  c_enc_txt <- get_col(cols,"^encuestador$"); c_enc_id <- get_col(cols,"id.?encuestador")
+  c_coo_txt <- get_col(cols,"^coordinador$"); c_coo_id <- get_col(cols,"id.?coordinador")
+  c_enc <- if(!is.na(c_enc_txt)) c_enc_txt else c_enc_id
+  c_coo <- if(!is.na(c_coo_txt)) c_coo_txt else c_coo_id
+  c_l1_lat <- get_col(cols,"l1_+latitude"); c_l1_lon <- get_col(cols,"l1_+longitude")
+  c_l1_acc <- get_col(cols,"l1_+accuracy"); c_l1_alt <- get_col(cols,"l1_+altitude")
+  c_l2_lat <- get_col(cols,"l2_+latitude"); c_l2_lon <- get_col(cols,"l2_+longitude")
+  c_l2_acc <- get_col(cols,"l2_+accuracy"); c_l2_alt <- get_col(cols,"l2_+altitude")
+  tiene_L2 <- !is.na(c_l2_lat) && !is.na(c_l2_lon)
+
+  d0 <- DF_RAW
+  if (!is.na(c_intento)) d0 <- d0 %>% filter(is.na(.data[[c_intento]]) | str_trim(.data[[c_intento]])=="")
+
+  DF_CAMPO <- d0 %>%
+    mutate(
+      ID_REGISTRO = if(!is.na(c_idreg)) na2blank(.data[[c_idreg]]) else "",
+      SECCION     = if(!is.na(c_seccion)) na2blank(.data[[c_seccion]]) else "",
+      ENCUESTADOR = str_squish(na2blank(.data[[c_enc]])),
+      COORDINADOR = if(!is.na(c_coo)) str_squish(na2blank(.data[[c_coo]])) else "",
+      FECHA       = if(!is.na(c_fecha)) na2blank(.data[[c_fecha]]) else "",
+      HORA_INICIO = if(!is.na(c_hora))  na2blank(.data[[c_hora]])  else "",
+      L1_lat = as.numeric(gsub(",",".",str_trim(.data[[c_l1_lat]]))),
+      L1_lon = as.numeric(gsub(",",".",str_trim(.data[[c_l1_lon]]))),
+      L1_acc = if(!is.na(c_l1_acc)) as.numeric(gsub(",",".",str_trim(.data[[c_l1_acc]]))) else NA_real_,
+      L2_lat = if(tiene_L2) as.numeric(gsub(",",".",str_trim(.data[[c_l2_lat]]))) else NA_real_,
+      L2_lon = if(tiene_L2) as.numeric(gsub(",",".",str_trim(.data[[c_l2_lon]]))) else NA_real_
+    ) %>%
+    filter(!is.na(L1_lat), !is.na(L1_lon), is.finite(L1_lat), is.finite(L1_lon)) %>%
+    rowwise() %>%
+    mutate(dist_m = if(!is.na(L2_lat)&&!is.na(L2_lon)&&is.finite(L2_lat)&&is.finite(L2_lon))
+      distGeo(c(L1_lon,L1_lat),c(L2_lon,L2_lat)) else NA_real_) %>%
+    ungroup() %>%
+    mutate(
+      dist_label = case_when(is.na(dist_m)~"Sin término", dist_m<=DIST_MAX~"OK",
+                              TRUE~paste0("EXCEDE ",DIST_MAX,"m")),
+      sin_movimiento = !is.na(dist_m) & dist_m < DIST_ESTATICO
+    ) %>%
+    left_join(DF_MUE, by="SECCION") %>%
+    mutate(MUNICIPIO = na2blank(MUNICIPIO)) %>%
+    arrange(ENCUESTADOR, FECHA, HORA_INICIO) %>%
+    group_by(FECHA, SECCION) %>% mutate(ord=row_number()) %>% ungroup()
+} else {
+  DF_CAMPO <- data.frame()
+}
+
+COL <- make_colors(safe_vec(DF_CAMPO$ENCUESTADOR))
+
+# ── PRECÁLCULO DE RUTAS A PIE (tope MAX_RUTAS_CI para no colgar el build) ────
+rutas_calc <- list()
+if (nrow(DF_CAMPO) > 1) {
+  contador <- 0
+  for (enc in safe_vec(DF_CAMPO$ENCUESTADOR)) {
+    if (contador >= MAX_RUTAS_CI) break
+    de <- DF_CAMPO %>% filter(ENCUESTADOR==enc) %>% arrange(FECHA, HORA_INICIO)
+    for (fecha_i in safe_vec(de$FECHA)) {
+      if (contador >= MAX_RUTAS_CI) break
+      dfe <- de %>% filter(FECHA==fecha_i) %>% arrange(HORA_INICIO)
+      if (nrow(dfe) < 2) next
+      for (j in seq_len(nrow(dfe)-1)) {
+        if (contador >= MAX_RUTAS_CI) break
+        p1 <- dfe[j,]; p2 <- dfe[j+1,]
+        if (any(is.na(c(p1$L1_lat,p1$L1_lon,p2$L1_lat,p2$L1_lon)))) next
+        d_pts <- distGeo(c(p1$L1_lon,p1$L1_lat), c(p2$L1_lon,p2$L1_lat))
+        if (d_pts < 3) next
+        contador <- contador + 1
+        ruta <- ruta_pie(p1$L1_lat, p1$L1_lon, p2$L1_lat, p2$L1_lon)
+        rutas_calc[[length(rutas_calc)+1]] <- list(lat=ruta$lat, lon=ruta$lon,
+                                                     enc=enc, color=COL[enc])
+      }
+    }
+  }
+}
+message("Rutas precalculadas: ", length(rutas_calc), " (tope=", MAX_RUTAS_CI, ")")
+```
+
+Filtros {data-height=90}
+-------------------------------------
+
+```{r filtros}
+sd_campo <- SharedData$new(DF_CAMPO, key = ~ID_REGISTRO, group = "campo")
+
+bscols(
+  widths = c(3,3,3,3),
+  filter_select("f_fecha", "📅 Fecha", sd_campo, ~FECHA),
+  filter_select("f_coord", "👥 Coordinador", sd_campo, ~COORDINADOR),
+  filter_select("f_enc",   "🧑 Encuestador", sd_campo, ~ENCUESTADOR),
+  filter_select("f_sec",   "📍 Sección", sd_campo, ~SECCION)
+)
+```
+
+Row {data-height=100}
+-------------------------------------
+
+### Coordinadores (total general)
+```{r}
+valueBox(length(safe_vec(DF_CAMPO$COORDINADOR)), icon="fa-users", color="purple")
+```
+
+### Encuestadores (total general)
+```{r}
+valueBox(length(safe_vec(DF_CAMPO$ENCUESTADOR)), icon="fa-user", color="primary")
+```
+
+### Entrevistas (total general)
+```{r}
+valueBox(nrow(DF_CAMPO), icon="fa-clipboard", color="success")
+```
+
+### Secciones (total general)
+```{r}
+valueBox(length(safe_vec(DF_CAMPO$SECCION)), icon="fa-map-marker", color="warning")
+```
+
+Mapa y búsqueda
+-------------------------------------
+
+### Mapa (filtros arriba lo cruzan automáticamente; escribe un ID_registro en la tabla de la derecha para localizarlo)
+
+```{r mapa}
+m <- leaflet(sd_campo) %>%
+  addProviderTiles(providers$OpenStreetMap, group="Calles") %>%
+  addProviderTiles(providers$Esri.WorldImagery, group="Satélite") %>%
+  setView(-99.07, 19.36, zoom=11)
+
+# Polígonos de sección: capa de referencia estática, togglable, no filtrada
+# dinámicamente (limitación de crosstalk con polígonos, ver nota arriba).
+m <- m %>% addPolygons(data=SHP, color="#444", weight=1, fillOpacity=0.03,
+                        label=~paste0("Sección ",SEC_NUM), group="Polígonos (referencia)")
+
+# Rutas precalculadas, agrupadas por encuestador, togglables por capa
+grupos_ruta <- unique(vapply(rutas_calc, function(r) r$enc, character(1)))
+for (g in grupos_ruta) {
+  for (r in rutas_calc) {
+    if (r$enc != g) next
+    m <- m %>% addPolylines(lat=r$lat, lng=r$lon, color=r$color, weight=2.5,
+                             opacity=0.8, group=paste0("Ruta: ", g))
+  }
+}
+
+# Puntos L1 — esta es la capa vinculada a los filtros/búsqueda (crosstalk)
+m <- m %>% addCircleMarkers(
+  lng=~L1_lon, lat=~L1_lat, radius=7,
+  color=~unname(COL[ENCUESTADOR]), fillColor=~unname(COL[ENCUESTADOR]),
+  fillOpacity=1, weight=2,
+  popup=~paste0("<b>ID_registro:</b> ",ID_REGISTRO,"<br>",
+                "<b>Encuestador:</b> ",ENCUESTADOR,"<br>",
+                "<b>Coordinador:</b> ",COORDINADOR,"<br>",
+                "<b>Sección:</b> ",SECCION," | ",MUNICIPIO,"<br>",
+                "<b>Fecha:</b> ",FECHA," | Hora: ",HORA_INICIO,"<br>",
+                "<b>Validación L1-L2:</b> ",dist_label),
+  label=~paste0(ENCUESTADOR," — Sec.",SECCION),
+  group="Entrevistas")
+
+m <- m %>% addLayersControl(
+  baseGroups=c("Calles","Satélite"),
+  overlayGroups=c("Entrevistas","Polígonos (referencia)", paste0("Ruta: ",grupos_ruta)),
+  options=layersControlOptions(collapsed=TRUE))
+
+m
+```
+
+### Buscar / tabla de entrevistas (escribe aquí el ID_registro)
+
+```{r tabla}
+datatable(
+  sd_campo,
+  extensions="Scroller",
+  options=list(pageLength=10, scrollY=520, scroller=TRUE, scrollX=TRUE,
+               dom="ftip", search=list(regex=FALSE)),
+  colnames=c("ID_registro"="ID_REGISTRO","Fecha"="FECHA","Coordinador"="COORDINADOR",
+             "Encuestador"="ENCUESTADOR","Sección"="SECCION","Alcaldía"="MUNICIPIO",
+             "Hora"="HORA_INICIO","Validación"="dist_label"),
+  rownames=FALSE,
+  filter="none"
+) %>% formatStyle("dist_label",
+      backgroundColor=styleEqual(
+        c("OK", paste0("EXCEDE ",DIST_MAX,"m"), "Sin término"),
+        c("lightgreen","salmon","lightyellow")))
+```
+
+Row {data-height=40}
+-------------------------------------
+### 
+```{r}
+p(paste0("Generado automáticamente — última actualización: ",
+         format(Sys.time(), "%Y-%m-%d %H:%M", tz="America/Mexico_City"), " (hora CDMX)."))
+```

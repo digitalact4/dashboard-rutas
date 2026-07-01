@@ -1,0 +1,69 @@
+# .github/workflows/render-dashboard.yml
+#
+# Qué hace:
+#   1. Cada hora (cron) o manualmente (workflow_dispatch), levanta un
+#      contenedor con R + librerías geoespaciales ya compiladas (rocker/geospatial
+#      evita compilar sf/gdal desde cero — eso solo ya te ahorra ~15-20 min por build).
+#   2. Restaura el JSON de la cuenta de servicio desde un GitHub Secret.
+#   3. Renderiza dashboard_estatico.Rmd -> docs/index.html
+#   4. Sube ese cambio a la rama principal (o a gh-pages si prefieres esa convención).
+#
+# CONFIGURACIÓN QUE TIENES QUE HACER TÚ (una vez):
+#   1. En tu repo: Settings -> Secrets and variables -> Actions -> New repository secret
+#        Nombre:  GDRIVE_SA_JSON
+#        Valor:   pega el CONTENIDO completo del archivo service_account.json
+#                 (todo el JSON, tal cual, incluyendo llaves { }).
+#   2. Comparte tu Google Sheet (Base demo y MUESTREO) con el email que viene
+#      dentro de ese JSON como "client_email" -> dale permiso de Lector.
+#   3. Crea la carpeta shapefile/ en la raíz del repo y copia ahí TODOS los
+#      archivos del shapefile (.shp .shx .dbf .prj, etc.).
+#   4. En Settings -> Pages: Source = "Deploy from a branch", Branch = main,
+#      carpeta = /docs.
+#   5. Tu URL pública quedará como:
+#      https://TU_USUARIO.github.io/TU_REPO/
+#      Esa es la que pegas en Looker Studio -> Insertar -> URL insertada.
+
+name: Renderizar dashboard estático
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # cada hora, en punto (UTC). Ajusta si quieres otro intervalo.
+  workflow_dispatch: {}     # botón "Run workflow" manual en la pestaña Actions
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    container:
+      image: rocker/geospatial:latest   # ya trae sf/gdal/geos compilados
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Escribir credencial de la cuenta de servicio
+        run: echo "$GDRIVE_SA_JSON" > service_account.json
+        env:
+          GDRIVE_SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+
+      - name: Instalar paquetes de R faltantes
+        run: |
+          Rscript -e 'if (!require("pacman")) install.packages("pacman")'
+          Rscript -e 'pacman::p_load(flexdashboard, crosstalk, leaflet, DT, dplyr, sf, googlesheets4, geosphere, stringr, jsonlite, httr, RColorBrewer, htmltools, rmarkdown)'
+
+      - name: Renderizar dashboard
+        run: |
+          mkdir -p docs
+          Rscript -e 'rmarkdown::render("dashboard_estatico.Rmd", output_file = "docs/index.html")'
+
+      - name: Borrar credencial (no debe quedar en el repo)
+        run: rm -f service_account.json
+
+      - name: Commit y push del HTML generado
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/index.html
+          git diff --staged --quiet && echo "Sin cambios" || git commit -m "Actualiza dashboard $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
