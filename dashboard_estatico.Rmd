@@ -264,33 +264,10 @@ message("Rutas precalculadas: ", length(rutas_calc), " (tope=", MAX_RUTAS_CI, ")
 sd_campo <- SharedData$new(DF_CAMPO, key = ~ID_REGISTRO, group = "campo")
 ```
 
-Row {data-height=100}
+Column {data-width=500}
 -------------------------------------
 
-### Coordinadores (total general)
-```{r}
-valueBox(length(safe_vec(DF_CAMPO$COORDINADOR)), icon="fa-users", color="purple")
-```
-
-### Encuestadores (total general)
-```{r}
-valueBox(length(safe_vec(DF_CAMPO$ENCUESTADOR)), icon="fa-user", color="primary")
-```
-
-### Entrevistas (total general)
-```{r}
-valueBox(nrow(DF_CAMPO), icon="fa-clipboard", color="success")
-```
-
-### Secciones (total general)
-```{r}
-valueBox(length(safe_vec(DF_CAMPO$SECCION)), icon="fa-map-marker", color="warning")
-```
-
-Mapa {data-height=650}
--------------------------------------
-
-### Mapa (escribe un ID_registro en la tabla de abajo para localizarlo y centrar el mapa ahí)
+### Mapa (escribe un ID_registro en la tabla de la derecha para localizarlo y centrar el mapa ahí)
 
 ```{r mapa}
 m <- leaflet(sd_campo) %>%
@@ -386,7 +363,33 @@ m <- m %>% htmlwidgets::onRender(
 m
 ```
 
-Tabla {data-height=280}
+Column {data-width=500}
+-------------------------------------
+
+Row {data-height=110}
+-------------------------------------
+
+### Coordinadores
+```{r}
+valueBox(length(safe_vec(DF_CAMPO$COORDINADOR)), icon="fa-users", color="purple")
+```
+
+### Encuestadores
+```{r}
+valueBox(length(safe_vec(DF_CAMPO$ENCUESTADOR)), icon="fa-user", color="primary")
+```
+
+### Entrevistas
+```{r}
+valueBox(nrow(DF_CAMPO), icon="fa-clipboard", color="success")
+```
+
+### Secciones
+```{r}
+valueBox(length(safe_vec(DF_CAMPO$SECCION)), icon="fa-map-marker", color="warning")
+```
+
+Row {data-height=590}
 -------------------------------------
 
 ### Buscar / tabla de entrevistas (escribe aquí el ID_registro)
@@ -395,7 +398,7 @@ Tabla {data-height=280}
 datatable(
   sd_campo,
   extensions="Scroller",
-  options=list(pageLength=10, scrollY=190, scroller=TRUE, scrollX=TRUE,
+  options=list(pageLength=10, scrollY=470, scroller=TRUE, scrollX=TRUE,
                dom="ftip", search=list(regex=FALSE),
                # Oculta L1_lat, L1_lon, L2_lat, L2_lon, dist_m — siguen en el
                # dato (el mapa los necesita), solo no se muestran en la tabla.
