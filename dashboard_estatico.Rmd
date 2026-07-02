@@ -73,9 +73,13 @@ norm_txt <- function(x) toupper(trimws(x))
 
 make_colors <- function(v) {
   n <- length(v); if (!n) return(character(0))
+  # Set3 es pastel a propósito (para fondos de gráficas) -> ilegible como
+  # punto en un mapa. Paired da colores saturados hasta 12 categorías.
+  # Para más de 12, se baja luminosidad y se sube croma del hcl para que
+  # tampoco salga descolorido.
   pal <- if (n<=8)  brewer.pal(max(3,n),"Set1") else
-    if (n<=12) brewer.pal(n,"Set3") else
-      hcl(seq(0,360,length.out=n+1)[1:n],80,50)
+    if (n<=12) brewer.pal(max(3,n),"Paired") else
+      hcl(seq(0,360,length.out=n+1)[1:n],100,45)
   setNames(pal[1:n], v)
 }
 
