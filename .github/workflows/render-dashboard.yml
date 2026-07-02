@@ -33,6 +33,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: pages-render
+  cancel-in-progress: true
+
 jobs:
   render:
     runs-on: ubuntu-latest
@@ -69,6 +73,21 @@ jobs:
           echo ""
           echo "Últimos 30 caracteres del archivo:"
           tail -c 30 service_account.json
+          echo ""
+          echo "--- VALIDACIÓN REAL CON R (jsonlite) ---"
+          Rscript -e '
+            x <- tryCatch(jsonlite::fromJSON("service_account.json"), error=function(e) e)
+            if (inherits(x,"error")) {
+              cat("ERROR AL PARSEAR EL JSON:", conditionMessage(x), "\n")
+            } else {
+              cat("JSON parseado correctamente. Campos encontrados:\n")
+              print(names(x))
+              cat("Valor de type:", x$type, "\n")
+              pk <- x$private_key
+              if (is.null(pk)) pk <- ""
+              cat("Nchar de private_key:", nchar(pk), "\n")
+            }
+          '
 
       - name: Instalar paquetes de R faltantes
         run: |
@@ -85,7 +104,6 @@ jobs:
 
       - name: Commit y push del HTML generado
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/index.html
