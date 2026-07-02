@@ -25,10 +25,10 @@ output:
 #   - Las rutas a pie por calle se precalculan UNA VEZ al momento de generar
 #     este archivo (no en cada clic). Están agrupadas por encuestador y se
 #     pueden prender/apagar con el control de capas.
-#   - El filtro por Fecha/Coordinador/Encuestador/Sección y la búsqueda por
-#     ID_registro SÍ son instantáneos e interactivos (crosstalk + DT), y de
-#     hecho se cruzan automáticamente entre sí sin necesitar la lógica
-#     manual de "cascada" que sí hizo falta en la versión Shiny.
+#   - Se quitaron los cuadros de filtro por Fecha/Coordinador/Encuestador/
+#     Sección a pedido — el mapa queda con prioridad visual. Sigue quedando
+#     la búsqueda por ID_registro (caja de la tabla), que filtra y además
+#     centra el mapa automáticamente en las coincidencias.
 # ==============================================================================
 
 knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
@@ -256,19 +256,12 @@ if (nrow(DF_CAMPO) > 1) {
 message("Rutas precalculadas: ", length(rutas_calc), " (tope=", MAX_RUTAS_CI, ")")
 ```
 
-Filtros {data-height=90}
--------------------------------------
-
-```{r filtros}
+```{r filtros, include=FALSE}
+# Los 4 cuadros de filtro (Fecha/Coordinador/Encuestador/Sección) se
+# quitaron a pedido — se conserva sd_campo porque el mapa y la tabla lo
+# necesitan para funcionar. La búsqueda libre sigue disponible desde la
+# caja de búsqueda de la tabla (sí sigue filtrando el mapa vía crosstalk).
 sd_campo <- SharedData$new(DF_CAMPO, key = ~ID_REGISTRO, group = "campo")
-
-bscols(
-  widths = c(3,3,3,3),
-  filter_select("f_fecha", "📅 Fecha", sd_campo, ~FECHA),
-  filter_select("f_coord", "👥 Coordinador", sd_campo, ~COORDINADOR),
-  filter_select("f_enc",   "🧑 Encuestador", sd_campo, ~ENCUESTADOR),
-  filter_select("f_sec",   "📍 Sección", sd_campo, ~SECCION)
-)
 ```
 
 Row {data-height=100}
@@ -294,10 +287,10 @@ valueBox(nrow(DF_CAMPO), icon="fa-clipboard", color="success")
 valueBox(length(safe_vec(DF_CAMPO$SECCION)), icon="fa-map-marker", color="warning")
 ```
 
-Mapa y búsqueda
+Mapa {data-height=650}
 -------------------------------------
 
-### Mapa (filtros arriba lo cruzan automáticamente; escribe un ID_registro en la tabla de la derecha para localizarlo)
+### Mapa (escribe un ID_registro en la tabla de abajo para localizarlo y centrar el mapa ahí)
 
 ```{r mapa}
 m <- leaflet(sd_campo) %>%
@@ -393,13 +386,16 @@ m <- m %>% htmlwidgets::onRender(
 m
 ```
 
+Tabla {data-height=280}
+-------------------------------------
+
 ### Buscar / tabla de entrevistas (escribe aquí el ID_registro)
 
 ```{r tabla}
 datatable(
   sd_campo,
   extensions="Scroller",
-  options=list(pageLength=10, scrollY=520, scroller=TRUE, scrollX=TRUE,
+  options=list(pageLength=10, scrollY=190, scroller=TRUE, scrollX=TRUE,
                dom="ftip", search=list(regex=FALSE),
                # Oculta L1_lat, L1_lon, L2_lat, L2_lon, dist_m — siguen en el
                # dato (el mapa los necesita), solo no se muestran en la tabla.
