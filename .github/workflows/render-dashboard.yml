@@ -51,6 +51,16 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Verificar que hay un repo git real
+        run: |
+          git --version
+          if [ -d .git ]; then
+            echo "OK: existe carpeta .git"
+          else
+            echo "ERROR: no existe .git — el checkout no hizo un clone real"
+            exit 1
+          fi
+
       - name: Escribir credencial de la cuenta de servicio
         shell: bash
         run: printf '%s' "$GDRIVE_SA_JSON" > service_account.json
@@ -104,6 +114,7 @@ jobs:
 
       - name: Commit y push del HTML generado
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/index.html
