@@ -366,24 +366,19 @@ m
 Column {data-width=350}
 -------------------------------------
 
-### Coordinadores {data-height=60}
+### {data-height=90}
 ```{r}
-valueBox(length(safe_vec(DF_CAMPO$COORDINADOR)), icon="fa-users", color="purple")
-```
-
-### Encuestadores {data-height=60}
-```{r}
-valueBox(length(safe_vec(DF_CAMPO$ENCUESTADOR)), icon="fa-user", color="primary")
-```
-
-### Entrevistas {data-height=60}
-```{r}
-valueBox(nrow(DF_CAMPO), icon="fa-clipboard", color="success")
-```
-
-### Secciones {data-height=60}
-```{r}
-valueBox(length(safe_vec(DF_CAMPO$SECCION)), icon="fa-map-marker", color="warning")
+mini_box <- function(valor, etiqueta, bg) {
+  div(style=paste0("background:",bg,";color:white;border-radius:4px;",
+                    "padding:6px 10px;text-align:center;flex:1;margin:2px;"),
+      div(style="font-size:22px;font-weight:bold;line-height:1.1;", valor),
+      div(style="font-size:10px;", etiqueta))
+}
+div(style="display:flex;height:100%;",
+    mini_box(length(safe_vec(DF_CAMPO$COORDINADOR)), "Coordinadores", "#7b1fa2"),
+    mini_box(length(safe_vec(DF_CAMPO$ENCUESTADOR)), "Encuestadores", "#1e88e5"),
+    mini_box(nrow(DF_CAMPO), "Entrevistas", "#43a047"),
+    mini_box(length(safe_vec(DF_CAMPO$SECCION)), "Secciones", "#fb8c00"))
 ```
 
 ### Buscar / tabla de entrevistas (escribe aquí el ID_registro) {data-height=680}
