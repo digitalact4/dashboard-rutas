@@ -2,7 +2,7 @@
 title: "Rutas Encuestadores — Reporte estático"
 output:
   flexdashboard::flex_dashboard:
-    orientation: rows
+    orientation: columns
     vertical_layout: fill
     theme: cosmo
 ---
