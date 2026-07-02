@@ -36,7 +36,7 @@ knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
 if (!require("pacman")) install.packages("pacman")
 pacman::p_load(flexdashboard, crosstalk, leaflet, DT, dplyr, sf,
                googlesheets4, geosphere, stringr, jsonlite, httr,
-               RColorBrewer, htmltools)
+               RColorBrewer, htmltools, htmlwidgets)
 
 # ── CONFIGURACIÓN ────────────────────────────────────────────────────────────
 SPREADSHEET_ID <- "1StvASvRaeix0-u-jVNVs04DegSfUu9zh74ohDVv4IYk"
@@ -307,9 +307,26 @@ m <- leaflet(sd_campo) %>%
 
 # Polígonos de sección: capa de referencia estática, togglable, no filtrada
 # dinámicamente (limitación de crosstalk con polígonos, ver nota arriba).
-m <- m %>% addPolygons(data=SHP, color="#999999", weight=1, opacity=0.5,
-                        fillColor="#cccccc", fillOpacity=0.15,
-                        label=~paste0("Sección ",SEC_NUM), group="Polígonos (referencia)")
+# Tres capas reales, no dos: (1) fuera del universo de MUESTREO -> ni se
+# dibuja, es ruido; (2) EN MUESTREO pero sin entrevistas todavía -> tenue
+# pero con borde bien marcado, para que se note el límite de la sección;
+# (3) con entrevistas ya realizadas -> color distinto, más saturado.
+secciones_muestreo   <- safe_vec(DF_MUE$SECCION)
+secciones_trabajadas <- safe_vec(DF_CAMPO$SECCION)
+
+poly_muestreo_sin_trabajar <- SHP %>%
+  filter(SEC_NUM %in% secciones_muestreo, !SEC_NUM %in% secciones_trabajadas)
+poly_trabajadas <- SHP %>% filter(SEC_NUM %in% secciones_trabajadas)
+
+m <- m %>%
+  addPolygons(data=poly_muestreo_sin_trabajar, color="#c9a227", weight=2, opacity=0.8,
+              fillColor="#f7e6a3", fillOpacity=0.3,
+              label=~paste0("Sección ",SEC_NUM," — en muestreo, sin entrevistas"),
+              group="Polígonos (referencia)") %>%
+  addPolygons(data=poly_trabajadas, color="#5b8fa8", weight=2, opacity=0.8,
+              fillColor="#a3cbdc", fillOpacity=0.3,
+              label=~paste0("Sección ",SEC_NUM," — con entrevistas"),
+              group="Polígonos (referencia)")
 
 # Rutas precalculadas, agrupadas por encuestador, togglables por capa
 grupos_ruta <- unique(vapply(rutas_calc, function(r) r$enc, character(1)))
@@ -340,6 +357,39 @@ m <- m %>% addLayersControl(
   overlayGroups=c("Entrevistas","Polígonos (referencia)", paste0("Ruta: ",grupos_ruta)),
   options=layersControlOptions(collapsed=TRUE))
 
+# Auto-centrar el mapa cuando la búsqueda (o cualquier filtro) reduce las
+# coincidencias — crosstalk avisa vía FilterHandle cuándo cambian las filas
+# visibles; aquí las traducimos a lat/lon y llamamos fitBounds()/setView().
+# Si se limpia el filtro (vuelve a null), no movemos el mapa.
+latlon_lookup <- setNames(
+  lapply(seq_len(nrow(DF_CAMPO)), function(i) list(DF_CAMPO$L1_lat[i], DF_CAMPO$L1_lon[i])),
+  DF_CAMPO$ID_REGISTRO
+)
+
+m <- m %>% htmlwidgets::onRender(
+  "function(el, x, data) {
+     var map = this;
+     var lookup = data.lookup;
+     var group = new window.crosstalk.FilterHandle();
+     group.setGroup('campo');
+
+     function fitToKeys(keys) {
+       var pts = [];
+       keys.forEach(function(k) { if (lookup[k]) pts.push(lookup[k]); });
+       if (pts.length === 1) {
+         map.setView(pts[0], 17);
+       } else if (pts.length > 1) {
+         map.fitBounds(pts, {maxZoom: 17, padding: [40,40]});
+       }
+     }
+
+     group.on('change', function(e) {
+       if (e.value) fitToKeys(e.value);
+     });
+   }",
+  data = list(lookup = latlon_lookup)
+)
+
 m
 ```
 
@@ -350,7 +400,15 @@ datatable(
   sd_campo,
   extensions="Scroller",
   options=list(pageLength=10, scrollY=520, scroller=TRUE, scrollX=TRUE,
-               dom="ftip", search=list(regex=FALSE)),
+               dom="ftip", search=list(regex=FALSE),
+               # Oculta L1_lat, L1_lon, L2_lat, L2_lon, dist_m — siguen en el
+               # dato (el mapa los necesita), solo no se muestran en la tabla.
+               # Índices 0-based sobre el orden de columnas de DF_CAMPO:
+               # 0 ID_REGISTRO, 1 FECHA, 2 HORA_INICIO, 3 COORDINADOR,
+               # 4 ENCUESTADOR, 5 SECCION, 6 MUNICIPIO, 7 L1_lat, 8 L1_lon,
+               # 9 L2_lat, 10 L2_lon, 11 dist_m, 12 dist_label,
+               # 13 sin_movimiento, 14 ord
+               columnDefs=list(list(visible=FALSE, targets=c(7,8,9,10,11)))),
   colnames=c("ID_registro"="ID_REGISTRO","Fecha"="FECHA","Coordinador"="COORDINADOR",
              "Encuestador"="ENCUESTADOR","Sección"="SECCION","Alcaldía"="MUNICIPIO",
              "Hora"="HORA_INICIO","Validación"="dist_label"),
