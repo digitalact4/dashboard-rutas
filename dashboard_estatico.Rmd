@@ -177,6 +177,7 @@ if (!is.null(DF_RAW) && nrow(DF_RAW)>0) {
   c_hora    <- get_col(cols,"hora.?inicio")
   c_intento <- get_col(cols,"^intento$")
   c_idreg   <- get_col(cols,"id.?registro")
+  c_mz      <- get_col(cols,"^mz$")
   c_enc_txt <- get_col(cols,"^encuestador$"); c_enc_id <- get_col(cols,"id.?encuestador")
   c_coo_txt <- get_col(cols,"^coordinador$"); c_coo_id <- get_col(cols,"id.?coordinador")
   c_enc <- if(!is.na(c_enc_txt)) c_enc_txt else c_enc_id
@@ -193,6 +194,7 @@ if (!is.null(DF_RAW) && nrow(DF_RAW)>0) {
   DF_CAMPO <- d0 %>%
     mutate(
       ID_REGISTRO = if(!is.na(c_idreg)) na2blank(.data[[c_idreg]]) else "",
+      MZ          = if(!is.na(c_mz)) na2blank(.data[[c_mz]]) else "",
       SECCION     = if(!is.na(c_seccion)) na2blank(.data[[c_seccion]]) else "",
       ENCUESTADOR = str_squish(na2blank(.data[[c_enc]])),
       COORDINADOR = if(!is.na(c_coo)) str_squish(na2blank(.data[[c_coo]])) else "",
@@ -225,7 +227,7 @@ if (!is.null(DF_RAW) && nrow(DF_RAW)>0) {
     # de nombre con nuestras columnas calculadas, rompiendo la tabla.
     select(ID_REGISTRO, FECHA, HORA_INICIO, COORDINADOR, ENCUESTADOR,
            SECCION, MUNICIPIO, L1_lat, L1_lon, L2_lat, L2_lon,
-           dist_m, dist_label, sin_movimiento, ord)
+           dist_m, dist_label, sin_movimiento, ord, MZ)
 } else {
   DF_CAMPO <- data.frame()
 }
@@ -274,10 +276,12 @@ Column {data-width=650}
 ### Mapa (escribe un ID_registro en la tabla de la derecha para localizarlo y centrar el mapa ahí)
 
 ```{r mapa}
+VISTA_DEFAULT <- list(lng=-99.07, lat=19.36, zoom=11)
+
 m <- leaflet(sd_campo) %>%
   addProviderTiles(providers$OpenStreetMap, group="Calles") %>%
   addProviderTiles(providers$Esri.WorldImagery, group="Satélite") %>%
-  setView(-99.07, 19.36, zoom=11)
+  setView(VISTA_DEFAULT$lng, VISTA_DEFAULT$lat, zoom=VISTA_DEFAULT$zoom)
 
 # Polígonos de sección: capa de referencia estática, togglable, no filtrada
 # dinámicamente (limitación de crosstalk con polígonos, ver nota arriba).
@@ -321,6 +325,7 @@ m <- m %>% addCircleMarkers(
                 "<b>Encuestador:</b> ",ENCUESTADOR,"<br>",
                 "<b>Coordinador:</b> ",COORDINADOR,"<br>",
                 "<b>Sección:</b> ",SECCION," | ",MUNICIPIO,"<br>",
+                "<b>Manzana:</b> ",ifelse(nchar(MZ)>0,MZ,"N/D"),"<br>",
                 "<b>Fecha:</b> ",FECHA," | Hora: ",HORA_INICIO,"<br>",
                 "<b>Validación L1-L2:</b> ",dist_label),
   label=~paste0(ENCUESTADOR," — Sec.",SECCION),
@@ -334,7 +339,9 @@ m <- m %>% addLayersControl(
 # Auto-centrar el mapa cuando la búsqueda (o cualquier filtro) reduce las
 # coincidencias — crosstalk avisa vía FilterHandle cuándo cambian las filas
 # visibles; aquí las traducimos a lat/lon y llamamos fitBounds()/setView().
-# Si se limpia el filtro (vuelve a null), no movemos el mapa.
+# FIX: antes, si se limpiaba el filtro (e.value volvía a null), no pasaba
+# nada -> el mapa se quedaba trabado en el último zoom de la búsqueda
+# anterior. Ahora sí regresa a la vista general de CDMX.
 latlon_lookup <- setNames(
   lapply(seq_len(nrow(DF_CAMPO)), function(i) list(DF_CAMPO$L1_lat[i], DF_CAMPO$L1_lon[i])),
   DF_CAMPO$ID_REGISTRO
@@ -344,6 +351,7 @@ m <- m %>% htmlwidgets::onRender(
   "function(el, x, data) {
      var map = this;
      var lookup = data.lookup;
+     var vistaDefault = data.vistaDefault;
      var group = new window.crosstalk.FilterHandle();
      group.setGroup('campo');
 
@@ -358,10 +366,14 @@ m <- m %>% htmlwidgets::onRender(
      }
 
      group.on('change', function(e) {
-       if (e.value) fitToKeys(e.value);
+       if (e.value) {
+         fitToKeys(e.value);
+       } else {
+         map.setView([vistaDefault.lat, vistaDefault.lng], vistaDefault.zoom);
+       }
      });
    }",
-  data = list(lookup = latlon_lookup)
+  data = list(lookup = latlon_lookup, vistaDefault = VISTA_DEFAULT)
 )
 
 m
