@@ -1,1 +1,0 @@
-Shapefile de sectores CDMX
