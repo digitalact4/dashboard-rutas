@@ -95,32 +95,7 @@ Column {data-width=700}
 ### Mapa de avance (usa el control de capas arriba a la derecha para prender/apagar cada estatus)
 
 ```{r mapa}
-completos   <- cuadrantes_status %>% filter(ESTATUS == "COMPLETO")
-en_proceso  <- cuadrantes_status %>% filter(ESTATUS == "EN PROCESO")
-pendientes  <- cuadrantes_status %>% filter(ESTATUS == "PENDIENTE")
-sin_dato    <- cuadrantes_status %>% filter(is.na(ESTATUS))
-
-popup_cuadrante <- function(df) {
-  paste0(
-    "<b>Cuadrante:</b> ", df$Nomenclatu, "<br>",
-    "<b>Sector:</b> ", df$Sector, "<br>",
-    "<b>Alcaldía:</b> ", df$Alcaldia, "<br>",
-    "<b>Estatus:</b> ", ifelse(is.na(df$ESTATUS), "SIN DATO", df$ESTATUS), "<br>",
-    "<b>Obtenidas/Esperadas:</b> ",
-      ifelse(is.na(df$OBTENIDAS), "N/D", df$OBTENIDAS), "/",
-      ifelse(is.na(df$ESPERADAS), "N/D", df$ESPERADAS), "<br>",
-    "<b>Fecha:</b> ", ifelse(is.na(df$FECHA_parsed), "N/D", as.character(df$FECHA_parsed))
-  )
-}
-
-# ── DISOLVER SECTORES POR ALCALDÍA Y CALCULAR SEMÁFORO AGREGADO ──────────────
-# No existe shapefile de alcaldías: se genera fusionando los polígonos de
-# sectores agrupados por el campo Alcaldia (st_union), y se le asigna un
-# estatus agregado según el mix de cuadrantes de esa alcaldía:
-#   COMPLETO   -> el 100% de sus cuadrantes están COMPLETO
-#   PENDIENTE  -> el 100% siguen PENDIENTE, cero avance
-#   EN PROCESO -> cualquier mezcla intermedia (algunos completos, algunos
-#                 pendientes, o al menos uno EN PROCESO)
+# ── RESUMEN Y CONTORNO POR ALCALDÍA ───────────────────────────────────────────
 resumen_alcaldia <- cuadrantes_status %>%
   st_drop_geometry() %>%
   group_by(Alcaldia) %>%
@@ -132,6 +107,7 @@ resumen_alcaldia <- cuadrantes_status %>%
     .groups = "drop"
   ) %>%
   mutate(
+    pct_completo = round(100 * completos / total, 1),
     estatus_alcaldia = case_when(
       completos == total ~ "COMPLETO",
       completos == 0 & proceso == 0 ~ "PENDIENTE",
@@ -143,6 +119,40 @@ alcaldias_poly <- sectores %>%
   group_by(Alcaldia) %>%
   summarise(geometry = st_union(geometry), .groups = "drop") %>%
   left_join(resumen_alcaldia, by = "Alcaldia")
+
+# Puntos centrales de cada alcaldía, para la etiqueta fija de texto
+alcaldias_centroides <- alcaldias_poly %>%
+  st_centroid() %>%
+  mutate(etiqueta = paste0(Alcaldia, ": ", pct_completo, "%"))
+
+# ── POPUP DE CUADRANTE, AHORA CON EL RESUMEN DE SU ALCALDÍA INCLUIDO ─────────
+# La capa de Alcaldías se deja NO interactiva (ver más abajo) para que no
+# tape los clics sobre los cuadrantes -- por eso el dato de alcaldía se
+# incrusta aquí, en el mismo popup del cuadrante, en vez de vivir aparte.
+popup_cuadrante <- function(df) {
+  resumen_df <- resumen_alcaldia[match(df$Alcaldia, resumen_alcaldia$Alcaldia), ]
+  paste0(
+    "<b>Cuadrante:</b> ", df$Nomenclatu, "<br>",
+    "<b>Sector:</b> ", df$Sector, "<br>",
+    "<b>Alcaldía:</b> ", df$Alcaldia, "<br>",
+    "<b>Estatus:</b> ", ifelse(is.na(df$ESTATUS), "SIN DATO", df$ESTATUS), "<br>",
+    "<b>Obtenidas/Esperadas:</b> ",
+      ifelse(is.na(df$OBTENIDAS), "N/D", df$OBTENIDAS), "/",
+      ifelse(is.na(df$ESPERADAS), "N/D", df$ESPERADAS), "<br>",
+    "<b>Fecha:</b> ", ifelse(is.na(df$FECHA_parsed), "N/D", as.character(df$FECHA_parsed)),
+    "<hr style='margin:4px 0;'>",
+    "<b>Avance de la alcaldía ", df$Alcaldia, ":</b><br>",
+    "Completos: ", resumen_df$completos, " / ", resumen_df$total,
+      " (", resumen_df$pct_completo, "%)<br>",
+    "En proceso: ", resumen_df$proceso, "<br>",
+    "Pendientes: ", resumen_df$pendientes
+  )
+}
+
+completos   <- cuadrantes_status %>% filter(ESTATUS == "COMPLETO")
+en_proceso  <- cuadrantes_status %>% filter(ESTATUS == "EN PROCESO")
+pendientes  <- cuadrantes_status %>% filter(ESTATUS == "PENDIENTE")
+sin_dato    <- cuadrantes_status %>% filter(is.na(ESTATUS))
 
 m <- leaflet() %>%
   addProviderTiles(providers$CartoDB.Positron, group = "Claro") %>%
@@ -176,21 +186,27 @@ if (nrow(sin_dato) > 0) {
                           popup = popup_cuadrante(sin_dato), group = "Sin dato")
 }
 
-# Contorno + semáforo agregado por alcaldía — opacidad baja y borde grueso
-# a propósito, para no tapar el detalle de cuadrantes individuales de abajo
+# Contorno de alcaldías: SOLO visual, sin popup ni label propio -- interactive
+# = FALSE evita que capture clics/hover y bloquee las capas de cuadrantes
+# que están debajo. El semáforo de color y el borde grueso siguen intactos.
 m <- m %>% addPolygons(
   data = alcaldias_poly,
   fillColor = ~color_status(estatus_alcaldia),
   fillOpacity = 0.25,
   color = "#000000", weight = 3, opacity = 0.9,
-  label = ~paste0(Alcaldia, " — ", estatus_alcaldia),
-  popup = ~paste0(
-    "<b>Alcaldía:</b> ", Alcaldia, "<br>",
-    "<b>Estatus:</b> ", estatus_alcaldia, "<br>",
-    "<b>Completos:</b> ", completos, " / ", total, "<br>",
-    "<b>En proceso:</b> ", proceso, "<br>",
-    "<b>Pendientes:</b> ", pendientes
-  ),
+  options = pathOptions(interactive = FALSE),
+  group = "Alcaldías"
+)
+
+# Etiqueta de texto fija (nombre + % completado) sobre cada alcaldía --
+# visible siempre, sin necesidad de clic ni hover, y no bloquea nada porque
+# son marcadores puntuales pequeños, no polígonos.
+m <- m %>% addLabelOnlyMarkers(
+  data = alcaldias_centroides,
+  label = ~etiqueta,
+  labelOptions = labelOptions(noHide = TRUE, direction = "center", textOnly = TRUE,
+                               style = list("font-weight" = "bold", "font-size" = "11px",
+                                            "text-shadow" = "1px 1px 2px white, -1px -1px 2px white")),
   group = "Alcaldías"
 )
 
