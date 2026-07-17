@@ -1,0 +1,46 @@
+name: Renderizar dashboard cuadrantes
+
+on:
+  schedule:
+    - cron: "0 16-23,0-1 * * *"   # 10am-7pm hora CDMX (UTC-6), en punto
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pages-render-cuadrantes
+  cancel-in-progress: true
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    container:
+      image: rocker/geospatial:latest
+    steps:
+      - name: Instalar git
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends git
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Instalar paquetes de R
+        run: |
+          Rscript -e 'if (!require("pacman")) install.packages("pacman")'
+          Rscript -e 'pacman::p_load(flexdashboard, leaflet, dplyr, sf, googlesheets4, stringr, DT, htmltools, rmarkdown)'
+
+      - name: Renderizar dashboard
+        run: |
+          mkdir -p docs
+          Rscript -e 'rmarkdown::render("dashboard_cuadrantes.Rmd", output_file = "docs/cuadrantes.html")'
+
+      - name: Commit y push del HTML generado
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/cuadrantes.html
+          git diff --staged --quiet && echo "Sin cambios" || git commit -m "Actualiza dashboard cuadrantes $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
