@@ -113,6 +113,37 @@ popup_cuadrante <- function(df) {
   )
 }
 
+# ── DISOLVER SECTORES POR ALCALDÍA Y CALCULAR SEMÁFORO AGREGADO ──────────────
+# No existe shapefile de alcaldías: se genera fusionando los polígonos de
+# sectores agrupados por el campo Alcaldia (st_union), y se le asigna un
+# estatus agregado según el mix de cuadrantes de esa alcaldía:
+#   COMPLETO   -> el 100% de sus cuadrantes están COMPLETO
+#   PENDIENTE  -> el 100% siguen PENDIENTE, cero avance
+#   EN PROCESO -> cualquier mezcla intermedia (algunos completos, algunos
+#                 pendientes, o al menos uno EN PROCESO)
+resumen_alcaldia <- cuadrantes_status %>%
+  st_drop_geometry() %>%
+  group_by(Alcaldia) %>%
+  summarise(
+    total      = n(),
+    completos  = sum(ESTATUS == "COMPLETO", na.rm = TRUE),
+    proceso    = sum(ESTATUS == "EN PROCESO", na.rm = TRUE),
+    pendientes = sum(ESTATUS == "PENDIENTE", na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    estatus_alcaldia = case_when(
+      completos == total ~ "COMPLETO",
+      completos == 0 & proceso == 0 ~ "PENDIENTE",
+      TRUE ~ "EN PROCESO"
+    )
+  )
+
+alcaldias_poly <- sectores %>%
+  group_by(Alcaldia) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop") %>%
+  left_join(resumen_alcaldia, by = "Alcaldia")
+
 m <- leaflet() %>%
   addProviderTiles(providers$CartoDB.Positron, group = "Claro") %>%
   addProviderTiles(providers$Esri.WorldImagery, group = "Satélite") %>%
@@ -145,13 +176,31 @@ if (nrow(sin_dato) > 0) {
                           popup = popup_cuadrante(sin_dato), group = "Sin dato")
 }
 
+# Contorno + semáforo agregado por alcaldía — opacidad baja y borde grueso
+# a propósito, para no tapar el detalle de cuadrantes individuales de abajo
+m <- m %>% addPolygons(
+  data = alcaldias_poly,
+  fillColor = ~color_status(estatus_alcaldia),
+  fillOpacity = 0.25,
+  color = "#000000", weight = 3, opacity = 0.9,
+  label = ~paste0(Alcaldia, " — ", estatus_alcaldia),
+  popup = ~paste0(
+    "<b>Alcaldía:</b> ", Alcaldia, "<br>",
+    "<b>Estatus:</b> ", estatus_alcaldia, "<br>",
+    "<b>Completos:</b> ", completos, " / ", total, "<br>",
+    "<b>En proceso:</b> ", proceso, "<br>",
+    "<b>Pendientes:</b> ", pendientes
+  ),
+  group = "Alcaldías"
+)
+
 m %>%
   addLegend(colors = c("#2e7d32", "#f9a825", "#c62828", "#9e9e9e"),
             labels = c("Completo", "En proceso", "Pendiente", "Sin dato"),
             title = "Estatus", position = "bottomright") %>%
   addLayersControl(
     baseGroups = c("Claro", "Satélite"),
-    overlayGroups = c("Completo", "En proceso", "Pendiente", "Sin dato", "Sectores (referencia)"),
+    overlayGroups = c("Alcaldías", "Completo", "En proceso", "Pendiente", "Sin dato", "Sectores (referencia)"),
     options = layersControlOptions(collapsed = TRUE))
 ```
 
