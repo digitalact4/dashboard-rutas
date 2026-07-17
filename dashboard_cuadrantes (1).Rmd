@@ -1,0 +1,203 @@
+---
+title: "Avance de Cuadrantes — Reporte estático"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(flexdashboard, leaflet, dplyr, sf, googlesheets4,
+               stringr, DT, htmltools)
+
+Sys.setenv(SHAPE_RESTORE_SHX = "YES")
+
+# ── CONFIGURACIÓN ─────────────────────────────────────────────────────────────
+SPREADSHEET_ID  <- "15IFqxK6qiBwuIiz2ZIo1FOhd7LlDxKR0DYHfJxCafqg"
+HOJA_STATUS     <- "MUESTREO"
+RUTA_SECTORES   <- "shapefile_sectores/SSC_Sectores_2025_region.shp"
+RUTA_CUADRANTES <- "shapefile_cuadrantes/SSC_Cuadrantes_2025_region.shp"
+
+quitar_acentos <- function(x) {
+  x <- toupper(trimws(x))
+  chartr("ÁÉÍÓÚÑ", "AEIOUN", x)
+}
+
+parsear_fecha <- function(x) {
+  d1 <- suppressWarnings(as.Date(x))
+  d2 <- suppressWarnings(as.Date(as.numeric(x), origin = "1899-12-30"))
+  ifelse(!is.na(d1), as.character(d1), as.character(d2))
+}
+
+color_status <- function(x) case_when(
+  x == "COMPLETO"   ~ "#2e7d32",
+  x == "EN PROCESO" ~ "#f9a825",
+  x == "PENDIENTE"  ~ "#c62828",
+  TRUE ~ "#9e9e9e"
+)
+
+# ── LECTURA DEL SHEET (pública, sin cuenta de servicio) ───────────────────────
+gs4_deauth()
+df_status <- tryCatch(
+  read_sheet(SPREADSHEET_ID, sheet = HOJA_STATUS, col_types = "c"),
+  error = function(e) NULL
+)
+
+if (is.null(df_status)) {
+  stop("No se pudo leer '", HOJA_STATUS, "' de forma pública. Revisa permisos del Sheet.")
+}
+
+df_status <- df_status %>%
+  rename(Alcaldia_sheet = `REGIÓN`) %>%
+  mutate(
+    CUADRANTE      = quitar_acentos(CUADRANTE),
+    ESTATUS        = quitar_acentos(ESTATUS),
+    Alcaldia_sheet = quitar_acentos(Alcaldia_sheet),
+    FECHA_parsed   = as.Date(parsear_fecha(FECHA))
+  )
+
+valores_esperados <- c("COMPLETO", "EN PROCESO", "PENDIENTE")
+valores_raros <- setdiff(unique(df_status$ESTATUS[!is.na(df_status$ESTATUS)]), valores_esperados)
+if (length(valores_raros) > 0) {
+  message("ESTATUS con valores no reconocidos: ", paste(valores_raros, collapse = ", "))
+}
+
+# ── SHAPEFILES ────────────────────────────────────────────────────────────────
+if (!file.exists(RUTA_CUADRANTES)) stop("No se encontró ", RUTA_CUADRANTES)
+if (!file.exists(RUTA_SECTORES))   stop("No se encontró ", RUTA_SECTORES)
+
+cuadrantes <- st_read(RUTA_CUADRANTES, quiet = TRUE) %>%
+  st_transform(4326) %>%
+  st_zm(drop = TRUE, what = "ZM") %>%
+  st_make_valid() %>%
+  mutate(Nomenclatu = quitar_acentos(Nomenclatu), Alcaldia = quitar_acentos(Alcaldia))
+
+sectores <- st_read(RUTA_SECTORES, quiet = TRUE) %>%
+  st_transform(4326) %>%
+  st_zm(drop = TRUE, what = "ZM") %>%
+  st_make_valid() %>%
+  mutate(Alcaldia = quitar_acentos(Alcaldia))
+
+cuadrantes_status <- cuadrantes %>%
+  left_join(df_status, by = c("Nomenclatu" = "CUADRANTE"))
+
+n_sin_match <- sum(is.na(cuadrantes_status$ESTATUS))
+message(n_sin_match, " cuadrantes sin ESTATUS tras el join")
+```
+
+Column {data-width=700}
+-------------------------------------
+
+### Mapa de avance (usa el control de capas arriba a la derecha para prender/apagar cada estatus)
+
+```{r mapa}
+completos   <- cuadrantes_status %>% filter(ESTATUS == "COMPLETO")
+en_proceso  <- cuadrantes_status %>% filter(ESTATUS == "EN PROCESO")
+pendientes  <- cuadrantes_status %>% filter(ESTATUS == "PENDIENTE")
+sin_dato    <- cuadrantes_status %>% filter(is.na(ESTATUS))
+
+popup_cuadrante <- function(df) {
+  paste0(
+    "<b>Cuadrante:</b> ", df$Nomenclatu, "<br>",
+    "<b>Sector:</b> ", df$Sector, "<br>",
+    "<b>Alcaldía:</b> ", df$Alcaldia, "<br>",
+    "<b>Estatus:</b> ", ifelse(is.na(df$ESTATUS), "SIN DATO", df$ESTATUS), "<br>",
+    "<b>Obtenidas/Esperadas:</b> ",
+      ifelse(is.na(df$OBTENIDAS), "N/D", df$OBTENIDAS), "/",
+      ifelse(is.na(df$ESPERADAS), "N/D", df$ESPERADAS), "<br>",
+    "<b>Fecha:</b> ", ifelse(is.na(df$FECHA_parsed), "N/D", as.character(df$FECHA_parsed))
+  )
+}
+
+m <- leaflet() %>%
+  addProviderTiles(providers$CartoDB.Positron, group = "Claro") %>%
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satélite") %>%
+  setView(lng = -99.13, lat = 19.35, zoom = 10) %>%
+  addPolygons(data = sectores, color = "#333333", weight = 2, fillOpacity = 0,
+              label = ~Nombre_Sec, group = "Sectores (referencia)")
+
+if (nrow(completos) > 0) {
+  m <- m %>% addPolygons(data = completos, fillColor = "#2e7d32", fillOpacity = 0.65,
+                          color = "#000000", weight = 1,
+                          label = ~paste0(Nomenclatu, " — COMPLETO"),
+                          popup = popup_cuadrante(completos), group = "Completo")
+}
+if (nrow(en_proceso) > 0) {
+  m <- m %>% addPolygons(data = en_proceso, fillColor = "#f9a825", fillOpacity = 0.65,
+                          color = "#000000", weight = 1,
+                          label = ~paste0(Nomenclatu, " — EN PROCESO"),
+                          popup = popup_cuadrante(en_proceso), group = "En proceso")
+}
+if (nrow(pendientes) > 0) {
+  m <- m %>% addPolygons(data = pendientes, fillColor = "#c62828", fillOpacity = 0.55,
+                          color = "#000000", weight = 1,
+                          label = ~paste0(Nomenclatu, " — PENDIENTE"),
+                          popup = popup_cuadrante(pendientes), group = "Pendiente")
+}
+if (nrow(sin_dato) > 0) {
+  m <- m %>% addPolygons(data = sin_dato, fillColor = "#9e9e9e", fillOpacity = 0.4,
+                          color = "#000000", weight = 1,
+                          label = ~paste0(Nomenclatu, " — SIN DATO"),
+                          popup = popup_cuadrante(sin_dato), group = "Sin dato")
+}
+
+m %>%
+  addLegend(colors = c("#2e7d32", "#f9a825", "#c62828", "#9e9e9e"),
+            labels = c("Completo", "En proceso", "Pendiente", "Sin dato"),
+            title = "Estatus", position = "bottomright") %>%
+  addLayersControl(
+    baseGroups = c("Claro", "Satélite"),
+    overlayGroups = c("Completo", "En proceso", "Pendiente", "Sin dato", "Sectores (referencia)"),
+    options = layersControlOptions(collapsed = TRUE))
+```
+
+Column {data-width=350}
+-------------------------------------
+
+### {data-height=90}
+```{r resumen}
+mini_box <- function(valor, etiqueta, bg) {
+  div(style = paste0("background:", bg, ";color:white;border-radius:4px;",
+                      "padding:6px 10px;text-align:center;flex:1;margin:2px;"),
+      div(style = "font-size:22px;font-weight:bold;line-height:1.1;", valor),
+      div(style = "font-size:10px;", etiqueta))
+}
+div(style = "display:flex;height:100%;",
+    mini_box(nrow(completos),  "Completos",  "#2e7d32"),
+    mini_box(nrow(en_proceso), "En proceso", "#f9a825"),
+    mini_box(nrow(pendientes), "Pendientes", "#c62828"))
+```
+
+### Sectores/cuadrantes completados y en proceso {data-height=680}
+
+```{r tabla}
+tabla_avance <- cuadrantes_status %>%
+  st_drop_geometry() %>%
+  filter(ESTATUS %in% c("COMPLETO", "EN PROCESO")) %>%
+  select(Alcaldia, Sector, Cuadrante = Nomenclatu, Estatus = ESTATUS,
+         Obtenidas = OBTENIDAS, Esperadas = ESPERADAS, Fecha = FECHA_parsed) %>%
+  arrange(Alcaldia, Sector, Cuadrante)
+
+datatable(
+  tabla_avance,
+  extensions = "Scroller",
+  options = list(pageLength = 10, scrollY = 560, scroller = TRUE, scrollX = TRUE,
+                 dom = "ftip"),
+  rownames = FALSE, filter = "top"
+) %>% formatStyle("Estatus",
+      backgroundColor = styleEqual(c("COMPLETO", "EN PROCESO"), c("lightgreen", "lightgoldenrodyellow")))
+```
+
+### {data-height=25}
+```{r}
+tags$small(
+  style = "color:#888;",
+  paste0("Generado automáticamente — última actualización: ",
+         format(Sys.time(), "%Y-%m-%d %H:%M", tz = "America/Mexico_City"), " (hora CDMX). ",
+         n_sin_match, " cuadrantes sin dato de estatus.")
+)
+```
